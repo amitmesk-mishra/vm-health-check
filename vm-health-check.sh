@@ -3,7 +3,7 @@
 # Checks CPU, memory and root-disk utilization on Ubuntu VMs.
 # Declares VM "healthy" only if ALL metrics are below THRESHOLD (default 60%).
 # Usage:
-#   ./vm_health_check.sh            # prints "HEALTHY" or "NOT HEALTHY"
+#   ./vm_health_check.sh            # prints "HEALTHY" or "NOT HEALTHY" and the three metrics
 #   ./vm_health_check.sh explain    # also prints explanation of metrics/reasons
 
 set -euo pipefail
@@ -21,10 +21,10 @@ EOF
 
 # Parse args
 EXPLAIN=false
-if [ "${#@}" -gt 1 ]; then
+if [ "$#" -gt 1 ]; then
   usage
 fi
-if [ "${#@}" -eq 1 ]; then
+if [ "$#" -eq 1 ]; then
   if [ "$1" = "explain" ]; then
     EXPLAIN=true
   else
@@ -61,11 +61,12 @@ get_cpu_usage() {
 
 # Get memory utilization: use (total - available) / total * 100
 get_mem_usage() {
-  # Use bytes for higher precision
-  read -r _ total used free shared buff cache available < <(free -b | awk '/^Mem:/ {print $1, $2, $3, $4, $5, $6, $7, $7}')
-  # preferred: available is field 7 on modern free
-  mem_total=$(free -b | awk '/^Mem:/ {print $2}')
-  mem_available=$(free -b | awk '/^Mem:/ {print $7}')
+  # Capture fields from free -b in a portable way
+  # Fields: label total used free shared buff cache available available
+  set -- $(free -b | awk '/^Mem:/ {print $1, $2, $3, $4, $5, $6, $7, $7}')
+  mem_total=$2
+  mem_available=$8
+
   if [ -z "$mem_total" ] || [ "$mem_total" -eq 0 ]; then
     echo "0.0"
     return
@@ -78,17 +79,15 @@ get_mem_usage() {
 # Get disk utilization for root (/) filesystem.
 get_disk_usage() {
   # Use POSIX df output (-P) and parse percent for mount "/"
-  # fallback: use df --output=pcent /
   pct=$(df -P / | awk 'NR==2 {gsub("%","",$5); print $5}')
-  # ensure decimal format
-  if [[ "$pct" =~ ^[0-9]+$ ]]; then
+  # ensure decimal format using portable checks
+  if echo "$pct" | grep -E -q '^[0-9]+$'; then
     echo "${pct}.0"
   else
     # try df --output
     pct2=$(df --output=pcent / 2>/dev/null | tail -n1 | tr -dc '0-9.')
     if [ -n "$pct2" ]; then
-      # ensure decimal
-      if [[ "$pct2" =~ \. ]]; then
+      if echo "$pct2" | grep -q '\.'; then
         echo "$pct2"
       else
         echo "${pct2}.0"
@@ -125,7 +124,7 @@ if float_lt "$disk_used" "$THRESHOLD"; then
   is_disk_ok=0
 fi
 
-if [ $is_cpu_ok -eq 0 ] && [ $is_mem_ok -eq 0 ] && [ $is_disk_ok -eq 0 ]; then
+if [ "$is_cpu_ok" -eq 0 ] && [ "$is_mem_ok" -eq 0 ] && [ "$is_disk_ok" -eq 0 ]; then
   HEALTH="HEALTHY"
   EXIT_CODE=0
 else
@@ -136,10 +135,15 @@ fi
 # Print short status
 echo "$HEALTH"
 
+# Always print measured values (CPU / Mem / Disk)
+printf "CPU:    %6s%%\n" "$cpu_used"
+printf "Memory: %6s%%\n" "$mem_used"
+printf "Disk(/):%6s%%\n" "$disk_used"
+
 # Explain if requested
 if [ "$EXPLAIN" = true ]; then
   echo "Threshold: ${THRESHOLD}% (a metric >= ${THRESHOLD}% is considered unhealthy)"
-  printf "CPU utilization:  %6s%%   -> %s\n" "$cpu_used" "$(awk -v v="$cpu_used" -v t="$THRESHOLD" 'BEGIN{print (v>=t? "EXCEEDS":"OK") }')"
+  printf "CPU utilization:    %6s%%   -> %s\n" "$cpu_used" "$(awk -v v="$cpu_used" -v t="$THRESHOLD" 'BEGIN{print (v>=t? "EXCEEDS":"OK") }')"
   printf "Memory utilization: %6s%%   -> %s\n" "$mem_used" "$(awk -v v="$mem_used" -v t="$THRESHOLD" 'BEGIN{print (v>=t? "EXCEEDS":"OK") }')"
   printf "Disk (/) utilization: %6s%%   -> %s\n" "$disk_used" "$(awk -v v="$disk_used" -v t="$THRESHOLD" 'BEGIN{print (v>=t? "EXCEEDS":"OK") }')"
 
